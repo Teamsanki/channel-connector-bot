@@ -20,10 +20,17 @@ const Index = () => {
   const fetchPosts = async () => {
     try {
       const querySnapshot = await getDocs(collection(db, "posts"));
-      const postsData = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+      const postsData = querySnapshot.docs.map(doc => {
+        const data = doc.data();
+        // Convert Firestore Timestamp to regular Date object
+        return {
+          id: doc.id,
+          content: data.content,
+          userId: data.userId,
+          username: data.username,
+          timestamp: data.timestamp ? new Date(data.timestamp.toDate()).toISOString() : null
+        };
+      });
       setPosts(postsData);
     } catch (error) {
       console.error("Error fetching posts:", error);
@@ -39,12 +46,14 @@ const Index = () => {
     if (!newPost.trim() || !auth.currentUser) return;
 
     try {
-      await addDoc(collection(db, "posts"), {
+      const postData = {
         content: newPost,
         userId: auth.currentUser.uid,
-        username: auth.currentUser.displayName,
+        username: auth.currentUser.displayName || "Anonymous",
         timestamp: serverTimestamp()
-      });
+      };
+
+      await addDoc(collection(db, "posts"), postData);
       setNewPost("");
       fetchPosts();
       toast({
