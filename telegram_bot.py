@@ -12,11 +12,11 @@ import os
 load_dotenv()
 
 # Bot configuration
-TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = os.getenv("OWNER_ID")
+TOKEN = os.getenv("7869282132:AAFPwZ8ZrFNQxUOPgAbgDm1oInXzDx5Wk74")
+OWNER_ID = os.getenv("7548678061")
 REQUIRED_CHANNELS = ["@Teamsankinetworkk", "@SankiProfession"]
-TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN")
-MONGODB_URL = os.getenv("MONGODB_URL")
+TELEGRAPH_TOKEN = os.getenv("https://graph.org/file/42f55ac11d620daa28dbb-26f56822035c88260f.jpg")
+MONGODB_URL = os.getenv("mongodb+srv://tsgcoder:tsgcoder@cluster0.1sodg.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
 
 # MongoDB setup
 client = MongoClient(MONGODB_URL)
