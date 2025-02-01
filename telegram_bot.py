@@ -4,16 +4,29 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import telegraph
 import time
 from datetime import datetime
+from pymongo import MongoClient
+from dotenv import load_dotenv
+import os
+
+# Load environment variables
+load_dotenv()
 
 # Bot configuration
-TOKEN = "YOUR_BOT_TOKEN"
-OWNER_ID = "YOUR_OWNER_ID"
+TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = os.getenv("OWNER_ID")
 REQUIRED_CHANNELS = ["@channel1", "@channel2"]
-TELEGRAPH_TOKEN = "YOUR_TELEGRAPH_TOKEN"
+TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN")
+MONGODB_URL = os.getenv("MONGODB_URL")
 
-# Database simulation (replace with actual database)
-user_data = {}
-payment_requests = {}
+# MongoDB setup
+client = MongoClient(MONGODB_URL)
+db = client['telegram_bot']
+users_collection = db['users']
+payments_collection = db['payments']
+reports_collection = db['reports']
+
+# Telegraph setup
+telegraph_client = telegraph.Telegraph(TELEGRAPH_TOKEN)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -34,6 +47,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Please join {channel} first!")
             return
 
+    # Create/Update user in MongoDB
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "username": update.effective_user.username,
+                "first_name": update.effective_user.first_name,
+                "last_login": datetime.now()
+            }
+        },
+        upsert=True
+    )
+
     # Show main menu
     keyboard = [
         ["💰 Deposit", "👤 Profile"],
@@ -44,9 +70,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Welcome! Choose an option:", reply_markup=reply_markup)
 
 async def handle_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Generate QR code using Telegraph
-    telegraph_client = telegraph.Telegraph(TELEGRAPH_TOKEN)
+    # Upload QR code to Telegraph
     qr_path = "path_to_qr_code.png"  # Generate QR code here
+    with open(qr_path, 'rb') as f:
+        telegraph_response = telegraph_client.upload_file(f)
+        qr_url = f"https://telegra.ph{telegraph_response[0]['src']}"
     
     keyboard = [
         [InlineKeyboardButton("Contact", url=f"tg://user?id={OWNER_ID}")],
@@ -55,45 +83,53 @@ async def handle_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "Scan QR code to deposit:\n[QR Code Link]",
+        f"Scan QR code to deposit:\n{qr_url}",
         reply_markup=reply_markup
     )
 
 async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user = user_data.get(user_id, {"total_amount": 0, "name": update.effective_user.first_name})
+    user_data = users_collection.find_one({"user_id": user_id})
+    
+    if not user_data:
+        user_data = {
+            "total_amount": 0,
+            "name": update.effective_user.first_name
+        }
     
     keyboard = [[InlineKeyboardButton("Payment History", callback_data="payment_history")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        f"Profile:\nName: {user['name']}\nID: {user_id}\nTotal Amount: ₹{user['total_amount']}",
+        f"Profile:\nName: {user_data['name']}\nID: {user_id}\nTotal Amount: ₹{user_data.get('total_amount', 0)}",
         reply_markup=reply_markup
     )
 
+async def handle_payment_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.callback_query.from_user.id
+    payments = payments_collection.find({"user_id": user_id}).sort("timestamp", -1)
+    
+    history_text = "Payment History:\n\n"
+    for payment in payments:
+        date = payment['timestamp'].strftime("%Y-%m-%d %H:%M")
+        history_text += f"Amount: ₹{payment['amount']} - {date}\n"
+    
+    await update.callback_query.message.reply_text(history_text)
+
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_users = len(user_data)
+    total_users = users_collection.count_documents({})
     await update.message.reply_text(f"Total Users: {total_users}")
 
-async def handle_tg_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE, report_type="tg"):
     user_id = update.effective_user.id
-    user = user_data.get(user_id, {"balance": 0})
+    user_data = users_collection.find_one({"user_id": user_id})
     
-    if user["balance"] >= 20:
-        await update.message.reply_text("Enter target user ID for reporting (8 reports):")
-        context.user_data["report_mode"] = "tg"
-    else:
+    if not user_data or user_data.get('balance', 0) < 20:
         await update.message.reply_text("Insufficient balance. Minimum ₹20 required for 8 reports.")
-
-async def handle_insta_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = user_data.get(user_id, {"balance": 0})
+        return
     
-    if user["balance"] >= 20:
-        await update.message.reply_text("Enter Instagram username for reporting (8 reports):")
-        context.user_data["report_mode"] = "insta"
-    else:
-        await update.message.reply_text("Insufficient balance. Minimum ₹20 required for 8 reports.")
+    await update.message.reply_text(f"Enter {'Telegram ID' if report_type == 'tg' else 'Instagram username'} for reporting (8 reports):")
+    context.user_data["report_mode"] = report_type
 
 async def handle_payment_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -111,7 +147,13 @@ async def handle_payment_amount(update: Update, context: ContextTypes.DEFAULT_TY
     
     try:
         amount = float(amount)
-        payment_requests[user_id] = amount
+        # Store payment request in MongoDB
+        payments_collection.insert_one({
+            "user_id": user_id,
+            "amount": amount,
+            "status": "pending",
+            "timestamp": datetime.now()
+        })
         
         # Notify owner
         keyboard = [
@@ -133,20 +175,6 @@ async def handle_payment_amount(update: Update, context: ContextTypes.DEFAULT_TY
     except:
         await update.message.reply_text("Please enter a valid amount.")
 
-async def handle_report_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "report_mode" not in context.user_data:
-        return
-    
-    target = update.message.text
-    mode = context.user_data["report_mode"]
-    
-    for i in range(8):
-        await update.message.reply_text(f"Reporting {target} ({i+1}/8)...")
-        await asyncio.sleep(3)
-    
-    await update.message.reply_text("Reporting completed!")
-    del context.user_data["report_mode"]
-
 def main():
     application = Application.builder().token(TOKEN).build()
     
@@ -155,10 +183,13 @@ def main():
     application.add_handler(MessageHandler(filters.Regex("^💰 Deposit$"), handle_deposit))
     application.add_handler(MessageHandler(filters.Regex("^👤 Profile$"), handle_profile))
     application.add_handler(MessageHandler(filters.Regex("^📊 Status$"), handle_status))
-    application.add_handler(MessageHandler(filters.Regex("^📱 TG REPORT$"), handle_tg_report))
-    application.add_handler(MessageHandler(filters.Regex("^📱 INSTA REPORT$"), handle_insta_report))
+    application.add_handler(MessageHandler(filters.Regex("^📱 TG REPORT$"), 
+                                         lambda update, context: handle_report(update, context, "tg")))
+    application.add_handler(MessageHandler(filters.Regex("^📱 INSTA REPORT$"), 
+                                         lambda update, context: handle_report(update, context, "insta")))
     application.add_handler(CallbackQueryHandler(handle_payment_submission, pattern="^submit_payment$"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_report_target))
+    application.add_handler(CallbackQueryHandler(handle_payment_history, pattern="^payment_history$"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_amount))
     
     # Start bot
     application.run_polling()
